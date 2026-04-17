@@ -29,28 +29,14 @@ import gc
 import httpx
 import numpy as np
 
-# Conditionally import ChromaDB to save memory when disabled
-if ENABLE_CHROMA:
-    import chromadb
-from docx import Document as DocxDocument
-from fastapi import FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import HTMLResponse, FileResponse
-from google.oauth2.service_account import Credentials
-from pypdf import PdfReader
-
-logger = logging.getLogger(__name__)
-
-
 # =============================================================================
 # Configuration
 # =============================================================================
 
 APP_TITLE = "Resume ↔ Job Matcher (All Industries)"
 DB_PATH = os.environ.get("JOBRESUME_DB_PATH", "jobresume.db")
-EMBEDDING_MODEL_NAME = os.environ.get("JOBRESUME_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-MAX_TEXT_CHARS = int(os.environ.get("JOBRESUME_MAX_TEXT_CHARS", "20000"))
 
-# LLM provider configuration: "ollama", "groq", or "openai"
+# LLM configuration
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # override default model per provider
@@ -64,6 +50,21 @@ OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 # ChromaDB configuration
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_db")
 ENABLE_CHROMA = os.environ.get("ENABLE_CHROMA", "true").lower() == "true"
+
+# Conditionally import ChromaDB to save memory when disabled
+if ENABLE_CHROMA:
+    import chromadb
+from docx import Document as DocxDocument
+from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi.responses import HTMLResponse, FileResponse
+from google.oauth2.service_account import Credentials
+from pypdf import PdfReader
+
+logger = logging.getLogger(__name__)
+
+# Add remaining configuration that wasn't in the first section
+EMBEDDING_MODEL_NAME = os.environ.get("JOBRESUME_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MAX_TEXT_CHARS = int(os.environ.get("JOBRESUME_MAX_TEXT_CHARS", "20000"))
 
 # Google Sheets configuration
 GOOGLE_SHEETS_CREDENTIALS_FILE = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "google_credentials.json")

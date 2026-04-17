@@ -24,16 +24,19 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import List, Optional, Tuple
 
-import chromadb
 import gspread
+import gc
 import httpx
 import numpy as np
+
+# Conditionally import ChromaDB to save memory when disabled
+if ENABLE_CHROMA:
+    import chromadb
 from docx import Document as DocxDocument
 from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse
 from google.oauth2.service_account import Credentials
 from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -960,26 +963,36 @@ def smart_skill_match(skill1: str, skill2: str) -> bool:
 # =============================================================================
 
 class EmbeddingMatcher:
-    """Computes embeddings and ranks matches using cosine similarity."""
+    """Computes embeddings using OpenAI API to save memory (no local model)."""
 
-    def __init__(self, model_name: str = EMBEDDING_MODEL_NAME):
-        self.model_name = model_name
-        self._model = None
-
-    @property
-    def model(self) -> SentenceTransformer:
-        """Lazy-load the model on first access."""
-        if self._model is None:
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
+    def __init__(self):
+        self.api_key = LLM_API_KEY if LLM_PROVIDER == "openai" else None
 
     def embed(self, text: str) -> np.ndarray:
+        """Generate embedding using OpenAI API."""
         text = (text or "").strip()
         if not text:
-            dim = self.model.get_sentence_embedding_dimension()
-            return np.zeros((dim,), dtype=np.float32)
-        emb = self.model.encode([text], normalize_embeddings=True)
-        return np.asarray(emb[0], dtype=np.float32)
+            return np.zeros((1536,), dtype=np.float32)  # OpenAI embedding dimension
+
+        if not self.api_key:
+            # Fallback: return zero embedding if no API key
+            return np.zeros((1536,), dtype=np.float32)
+
+        try:
+            with httpx.Client(timeout=30) as client:
+                resp = client.post(
+                    "https://api.openai.com/v1/embeddings",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={"input": text, "model": "text-embedding-3-small"}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    embedding = data["data"][0]["embedding"]
+                    return np.asarray(embedding, dtype=np.float32)
+        except Exception as e:
+            logger.warning("OpenAI embedding failed: %s", e)
+
+        return np.zeros((1536,), dtype=np.float32)
 
     def embed_resume(self, resume_data: ResumeData, raw_text: str) -> np.ndarray:
         """Create embedding from resume data + raw text."""
@@ -1989,7 +2002,7 @@ def on_startup() -> None:
     llm_client = create_llm_client()
     logger.info("LLM provider: %s", llm_client.get_provider_name())
     extractor = SkillExtractor(llm_client)
-    matcher = EmbeddingMatcher(EMBEDDING_MODEL_NAME)  # Lazy-loads model on first use
+    matcher = EmbeddingMatcher()  # Uses OpenAI embeddings to save memory
     gsheet_sync = GoogleSheetsSync(GOOGLE_SHEETS_CREDENTIALS_FILE, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
 
     # Migrate existing embeddings from SQLite JSON blobs into ChromaDB (one-time)
@@ -2007,6 +2020,10 @@ def on_startup() -> None:
                             result["added"], result["skipped"], result["deleted"])
         except Exception as e:
             logger.warning("Google Sheets sync failed on startup: %s", str(e))
+
+    # Force garbage collection to free memory after startup
+    gc.collect()
+    logger.info("Startup complete, memory freed via garbage collection")
 
 
 def _migrate_embeddings_to_chroma(database: Database, vector_store: VectorStore) -> None:

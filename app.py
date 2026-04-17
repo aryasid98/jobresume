@@ -438,8 +438,10 @@ class GroqClient(LLMClient):
                     f"{self.base_url}/models",
                     headers={"Authorization": f"Bearer {self.api_key}"}
                 )
+                print(f"Groq API status: {resp.status_code}, response: {resp.text[:200]}")
                 return resp.status_code == 200
-        except Exception:
+        except Exception as e:
+            print(f"Groq API error: {e}")
             return False
 
     def get_provider_name(self) -> str:
@@ -1032,14 +1034,16 @@ class VectorStore:
 
     def get_resume_embedding(self, resume_id: int) -> Optional[np.ndarray]:
         result = self.resumes.get(ids=[str(resume_id)], include=["embeddings"])
-        if result["embeddings"]:
-            return np.asarray(result["embeddings"][0], dtype=np.float32)
+        embeddings = result.get("embeddings")
+        if embeddings and len(embeddings) > 0:
+            return np.asarray(embeddings[0], dtype=np.float32)
         return None
 
     def get_job_embedding(self, job_id: int) -> Optional[np.ndarray]:
         result = self.jobs.get(ids=[str(job_id)], include=["embeddings"])
-        if result["embeddings"]:
-            return np.asarray(result["embeddings"][0], dtype=np.float32)
+        embeddings = result.get("embeddings")
+        if embeddings and len(embeddings) > 0:
+            return np.asarray(embeddings[0], dtype=np.float32)
         return None
 
     def query_similar_jobs(self, query_embedding: np.ndarray, top_k: int = 50) -> dict:
@@ -2717,6 +2721,49 @@ def jobs_board(q: str = Query("", alias="q"), candidate_id: str = Query("", alia
     return html_page("Jobs Board", body)
 
 
+@app.get("/debug_llm", response_class=HTMLResponse)
+def debug_llm() -> str:
+    """Debug endpoint to check LLM configuration."""
+    api_key_set = bool(LLM_API_KEY)
+    api_key_length = len(LLM_API_KEY) if LLM_API_KEY else 0
+    provider = LLM_PROVIDER
+    model = LLM_MODEL
+    
+    llm_available = llm_client and llm_client.is_available()
+    provider_name = llm_client.get_provider_name() if llm_client else "Not configured"
+    
+    # Test Groq API directly if configured
+    groq_test_result = ""
+    if provider == "groq" and LLM_API_KEY:
+        try:
+            with httpx.Client(timeout=10) as client:
+                resp = client.get(
+                    "https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {LLM_API_KEY}"}
+                )
+                groq_test_result = f"<p><b>Groq API test:</b> Status {resp.status_code}, Response: {resp.text[:200]}</p>"
+        except Exception as e:
+            groq_test_result = f"<p><b>Groq API test:</b> Error: {str(e)}</p>"
+    
+    body = f"""
+    <h1>LLM Configuration Debug</h1>
+    <div style='font-family: monospace; background: #f5f5f5; padding: 15px; border-radius: 5px;'>
+        <p><b>LLM_PROVIDER:</b> {provider}</p>
+        <p><b>LLM_MODEL:</b> {model}</p>
+        <p><b>LLM_API_KEY set:</b> {api_key_set}</p>
+        <p><b>LLM_API_KEY length:</b> {api_key_length}</p>
+        <p><b>llm_client available:</b> {llm_available}</p>
+        <p><b>Provider name:</b> {provider_name}</p>
+        {groq_test_result}
+    </div>
+    <div style='margin-top:20px'>
+        <a href='/'><button>Back to Home</button></a>
+        <a href='/candidate'><button>Candidate Portal</button></a>
+    </div>
+    """
+    return html_page("LLM Debug", body)
+
+
 @app.get("/sync_jobs", response_class=HTMLResponse)
 def sync_jobs() -> str:
     """Manually trigger Google Sheets sync."""
@@ -2881,4 +2928,9 @@ def admin() -> str:
 
 # =============================================================================
 # Run with: uvicorn start:app --reload --port 8000
+# For Render deployment, uses PORT environment variable
 # =============================================================================
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)

@@ -60,6 +60,7 @@ OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 
 # ChromaDB configuration
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_db")
+ENABLE_CHROMA = os.environ.get("ENABLE_CHROMA", "true").lower() == "true"
 
 # Google Sheets configuration
 GOOGLE_SHEETS_CREDENTIALS_FILE = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "google_credentials.json")
@@ -961,8 +962,16 @@ def smart_skill_match(skill1: str, skill2: str) -> bool:
 class EmbeddingMatcher:
     """Computes embeddings and ranks matches using cosine similarity."""
 
-    def __init__(self, model: SentenceTransformer):
-        self.model = model
+    def __init__(self, model_name: str = EMBEDDING_MODEL_NAME):
+        self.model_name = model_name
+        self._model = None
+
+    @property
+    def model(self) -> SentenceTransformer:
+        """Lazy-load the model on first access."""
+        if self._model is None:
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
 
     def embed(self, text: str) -> np.ndarray:
         text = (text or "").strip()
@@ -1967,20 +1976,25 @@ def serve_resume(filename: str):
 @app.on_event("startup")
 def on_startup() -> None:
     global db, llm_client, extractor, matcher, vstore, gsheet_sync
-    # Initialize ChromaDB vector store
-    vstore = VectorStore(CHROMA_DB_PATH)
-    # Initialize database with vector store
+    # Initialize ChromaDB vector store (optional for memory-constrained deployments)
+    if ENABLE_CHROMA:
+        vstore = VectorStore(CHROMA_DB_PATH)
+        logger.info("ChromaDB enabled at: %s", CHROMA_DB_PATH)
+    else:
+        vstore = None
+        logger.info("ChromaDB disabled for memory optimization")
+    # Initialize database with vector store (optional)
     db = Database(vector_store=vstore)
     # Initialize LLM client based on LLM_PROVIDER env var
     llm_client = create_llm_client()
     logger.info("LLM provider: %s", llm_client.get_provider_name())
     extractor = SkillExtractor(llm_client)
-    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    matcher = EmbeddingMatcher(model)
+    matcher = EmbeddingMatcher(EMBEDDING_MODEL_NAME)  # Lazy-loads model on first use
     gsheet_sync = GoogleSheetsSync(GOOGLE_SHEETS_CREDENTIALS_FILE, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
 
     # Migrate existing embeddings from SQLite JSON blobs into ChromaDB (one-time)
-    _migrate_embeddings_to_chroma(db, vstore)
+    if ENABLE_CHROMA:
+        _migrate_embeddings_to_chroma(db, vstore)
 
     # Auto-sync Google Sheet jobs on startup (cleanup expired + fetch new)
     if gsheet_sync.is_configured():
@@ -2126,9 +2140,10 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
     safe_name = (resume.filename or "resume").replace("/", "_").replace("\\", "_")
     # Use just the filename (no timestamp) so same file gets overwritten
     file_path = os.path.join(uploads_dir, safe_name)
-    content = await resume.read()
+    # Stream file to disk instead of loading into memory
     with open(file_path, "wb") as f:
-        f.write(content)
+        async for chunk in resume.file_iterator():
+            f.write(chunk)
 
     # Extract text
     raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)
@@ -2279,9 +2294,10 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
     for resume in resumes:
         safe_name = (resume.filename or "resume").replace("/", "_").replace("\\", "_")
         file_path = os.path.join(uploads_dir, safe_name)
-        content = await resume.read()
+        # Stream file to disk instead of loading into memory
         with open(file_path, "wb") as f:
-            f.write(content)
+            async for chunk in resume.file_iterator():
+                f.write(chunk)
 
         # Extract text
         raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)

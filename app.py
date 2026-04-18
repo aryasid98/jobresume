@@ -2381,7 +2381,10 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
     jobs = db.get_all_jobs()
     scored_jobs = rank_by_skills(resume_data, jobs,
                                 vector_store=vstore,
-                                resume_embedding=embedding)[:10]
+                                resume_embedding=embedding)
+    # Filter: only show jobs with at least 2 matched skills
+    scored_jobs = [(score, job, match_info) for score, job, match_info in scored_jobs
+                   if len(match_info["matched_required"]) + len(match_info["matched_preferred"]) + len(match_info["matched_domain"]) >= 2][:10]
 
     # Render extracted skills
     skills_html = ""
@@ -2595,7 +2598,10 @@ def find_jobs_for_resume(resume_id: str) -> str:
     jobs = db.get_all_jobs()
     scored_jobs = rank_by_skills(resume_data, jobs,
                                 vector_store=vstore,
-                                resume_embedding=resume_emb)[:10]
+                                resume_embedding=resume_emb)
+    # Filter: only show jobs with at least 2 matched skills
+    scored_jobs = [(score, job, match_info) for score, job, match_info in scored_jobs
+                   if len(match_info["matched_required"]) + len(match_info["matched_preferred"]) + len(match_info["matched_domain"]) >= 2][:10]
     
     # Render extracted skills
     skills_html = ""
@@ -2719,7 +2725,10 @@ def create_job(title: str = Form(...), description: str = Form(...), posted_by: 
     resumes = db.get_all_resumes()
     scored_resumes = rank_resumes_by_skills(job_data, resumes, title,
                                             vector_store=vstore,
-                                            job_embedding=embedding)[:10]
+                                            job_embedding=embedding)
+    # Filter: only show resumes with at least 2 matched skills
+    scored_resumes = [(score, resume, match_info) for score, resume, match_info in scored_resumes
+                      if len(match_info["matched_required"]) + len(match_info["matched_preferred"]) + len(match_info["matched_domain"]) >= 2][:10]
 
     # Render extracted requirements
     req_html = ""
@@ -2819,6 +2828,9 @@ def jobs_board(q: str = Query("", alias="q"), candidate_id: str = Query("", alia
             scored_jobs = rank_by_skills(resume_data, jobs,
                                          vector_store=vstore,
                                          resume_embedding=resume_emb)
+            # Filter: only show jobs with at least 2 matched skills
+            scored_jobs = [(score, job, match_info) for score, job, match_info in scored_jobs
+                           if len(match_info["matched_required"]) + len(match_info["matched_preferred"]) + len(match_info["matched_domain"]) >= 2]
 
     # Build candidate dropdown options
     candidate_options = ""

@@ -51,12 +51,16 @@ OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "120"))
 CHROMA_DB_PATH = os.environ.get("CHROMA_DB_PATH", "./chroma_db")
 ENABLE_CHROMA = os.environ.get("ENABLE_CHROMA", "true").lower() == "true"
 
+# Google Drive configuration
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
+USE_GOOGLE_DRIVE = os.environ.get("USE_GOOGLE_DRIVE", "false").lower() == "true"
+
 # Conditionally import ChromaDB to save memory when disabled
 if ENABLE_CHROMA:
     import chromadb
 from docx import Document as DocxDocument
 from fastapi import FastAPI, File, Form, Query, UploadFile
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from google.oauth2.service_account import Credentials
 from pypdf import PdfReader
 
@@ -960,6 +964,110 @@ def smart_skill_match(skill1: str, skill2: str) -> bool:
 
 
 # =============================================================================
+# Google Drive Storage
+# =============================================================================
+
+class GoogleDriveClient:
+    """Google Drive client for file storage using service account."""
+
+    def __init__(self):
+        if not all([GOOGLE_SHEETS_CREDENTIALS_FILE, GOOGLE_DRIVE_FOLDER_ID]):
+            logger.warning("Google Drive credentials not configured")
+            self.service = None
+            self.folder_id = None
+            return
+
+        try:
+            from googleapiclient.discovery import build
+            from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+
+            credentials = ServiceAccountCredentials.from_service_account_file(
+                GOOGLE_SHEETS_CREDENTIALS_FILE,
+                scopes=['https://www.googleapis.com/auth/drive']
+            )
+            self.service = build('drive', 'v3', credentials=credentials)
+            self.folder_id = GOOGLE_DRIVE_FOLDER_ID
+            logger.info("Google Drive client initialized for folder: %s", self.folder_id)
+        except Exception as e:
+            logger.error("Failed to initialize Google Drive client: %s", e)
+            self.service = None
+            self.folder_id = None
+
+    def is_configured(self) -> bool:
+        return self.service is not None
+
+    def upload_file(self, file_data: bytes, filename: str, content_type: str = None) -> Optional[str]:
+        """Upload file to Google Drive and return file ID."""
+        if not self.is_configured():
+            return None
+
+        try:
+            file_metadata = {
+                'name': filename,
+                'parents': [self.folder_id]
+            }
+
+            from googleapiclient.http import MediaIoBaseUpload
+            import io
+
+            media = MediaIoBaseUpload(
+                io.BytesIO(file_data),
+                mimetype=content_type or 'application/octet-stream'
+            )
+
+            file = self.service.files().create(
+                body=file_metadata,
+                media_body=media,
+                fields='id'
+            ).execute()
+
+            file_id = file.get('id')
+            logger.info("Uploaded to Google Drive: %s (ID: %s)", filename, file_id)
+            return file_id
+        except Exception as e:
+            logger.error("Google Drive upload failed for %s: %s", filename, e)
+            return None
+
+    def get_file(self, file_id: str) -> Optional[bytes]:
+        """Download file from Google Drive."""
+        if not self.is_configured():
+            return None
+
+        try:
+            from googleapiclient.http import MediaIoBaseDownload
+            import io
+
+            request = self.service.files().get_media(fileId=file_id)
+            file_data = io.BytesIO()
+            downloader = MediaIoBaseDownload(file_data, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+
+            return file_data.getvalue()
+        except Exception as e:
+            logger.error("Google Drive download failed for %s: %s", file_id, e)
+            return None
+
+    def delete_file(self, file_id: str) -> bool:
+        """Delete file from Google Drive."""
+        if not self.is_configured():
+            return False
+
+        try:
+            self.service.files().delete(fileId=file_id).execute()
+            logger.info("Deleted from Google Drive: %s", file_id)
+            return True
+        except Exception as e:
+            logger.error("Google Drive delete failed for %s: %s", file_id, e)
+            return False
+
+    def get_download_url(self, file_id: str) -> str:
+        """Get direct download URL for file (requires authentication)."""
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+# =============================================================================
 # Embedding & Matching
 # =============================================================================
 
@@ -1140,9 +1248,16 @@ class Database:
                     extracted_data_json TEXT NOT NULL,
                     embedding_json TEXT NOT NULL,
                     file_path TEXT,
+                    storage_type TEXT DEFAULT 'local',
                     created_at TEXT NOT NULL
                 );
             """)
+            # Migration: Add storage_type column if not exists
+            cursor = conn.execute("PRAGMA table_info(resumes)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "storage_type" not in columns:
+                conn.execute("ALTER TABLE resumes ADD COLUMN storage_type TEXT DEFAULT 'local'")
+                conn.commit()
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1204,7 +1319,7 @@ class Database:
             conn.close()
 
     def insert_resume(self, filename: str, content_type: str, raw_text: str,
-                      extracted_data: ResumeData, embedding: np.ndarray, file_path: str) -> int:
+                      extracted_data: ResumeData, embedding: np.ndarray, file_path: str, storage_type: str = "local") -> int:
         """Insert or update resume. If filename exists, override it."""
         conn = self._get_conn()
         try:
@@ -1212,14 +1327,14 @@ class Database:
             existing = conn.execute(
                 "SELECT id FROM resumes WHERE filename = ?", (filename,)
             ).fetchone()
-            
+
             if existing:
                 # Update existing resume
                 conn.execute(
-                    """UPDATE resumes SET content_type=?, raw_text=?, extracted_data_json=?, 
-                       embedding_json=?, file_path=?, created_at=? WHERE filename=?""",
+                    """UPDATE resumes SET content_type=?, raw_text=?, extracted_data_json=?,
+                       embedding_json=?, file_path=?, storage_type=?, created_at=? WHERE filename=?""",
                     (content_type, raw_text, extracted_data.to_json(),
-                     EmbeddingMatcher.embedding_to_json(embedding), file_path,
+                     EmbeddingMatcher.embedding_to_json(embedding), file_path, storage_type,
                      datetime.now(timezone.utc).isoformat(), filename)
                 )
                 conn.commit()
@@ -1227,10 +1342,10 @@ class Database:
             else:
                 # Insert new resume
                 cursor = conn.execute(
-                    """INSERT INTO resumes (filename, content_type, raw_text, extracted_data_json, embedding_json, file_path, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO resumes (filename, content_type, raw_text, extracted_data_json, embedding_json, file_path, storage_type, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (filename, content_type, raw_text, extracted_data.to_json(),
-                     EmbeddingMatcher.embedding_to_json(embedding), file_path,
+                     EmbeddingMatcher.embedding_to_json(embedding), file_path, storage_type,
                      datetime.now(timezone.utc).isoformat())
                 )
                 conn.commit()
@@ -1315,6 +1430,13 @@ class Database:
         conn = self._get_conn()
         try:
             return conn.execute("SELECT * FROM resumes ORDER BY id DESC").fetchall()
+        finally:
+            conn.close()
+
+    def get_resume_by_filename(self, filename: str) -> Optional[sqlite3.Row]:
+        conn = self._get_conn()
+        try:
+            return conn.execute("SELECT * FROM resumes WHERE filename = ?", (filename,)).fetchone()
         finally:
             conn.close()
 
@@ -1980,6 +2102,14 @@ gsheet_sync: Optional[GoogleSheetsSync] = None
 @app.get("/resume/{filename}")
 def serve_resume(filename: str):
     """Serve resume file for viewing/downloading."""
+    # Check if stored in Google Drive
+    resume = db.get_resume_by_filename(filename)
+    if resume and resume.get("storage_type") == "gdrive":
+        if gdrive_client and gdrive_client.is_configured():
+            drive_url = gdrive_client.get_download_url(resume["file_path"])
+            return RedirectResponse(drive_url)
+
+    # Fall back to local file
     uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
     file_path = os.path.join(uploads_dir, filename)
     if os.path.exists(file_path):
@@ -1989,7 +2119,7 @@ def serve_resume(filename: str):
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global db, llm_client, extractor, matcher, vstore, gsheet_sync
+    global db, llm_client, extractor, matcher, vstore, gsheet_sync, gdrive_client
     # Initialize ChromaDB vector store (optional for memory-constrained deployments)
     if ENABLE_CHROMA:
         vstore = VectorStore(CHROMA_DB_PATH)
@@ -2005,6 +2135,13 @@ def on_startup() -> None:
     extractor = SkillExtractor(llm_client)
     matcher = EmbeddingMatcher()  # Uses OpenAI embeddings to save memory
     gsheet_sync = GoogleSheetsSync(GOOGLE_SHEETS_CREDENTIALS_FILE, GOOGLE_SHEET_ID, GOOGLE_SHEET_NAME)
+    # Initialize Google Drive client if enabled
+    if USE_GOOGLE_DRIVE:
+        gdrive_client = GoogleDriveClient()
+        logger.info("Google Drive storage enabled")
+    else:
+        gdrive_client = None
+        logger.info("Google Drive storage disabled")
 
     # Migrate existing embeddings from SQLite JSON blobs into ChromaDB (one-time)
     if ENABLE_CHROMA:
@@ -2152,19 +2289,44 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
     if not all([db, extractor, matcher]):
         return html_page("Error", "", error="System not initialized")
 
-    # Save uploaded file (use consistent filename for override)
-    uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
-    os.makedirs(uploads_dir, exist_ok=True)
+    # Save uploaded file
     safe_name = (resume.filename or "resume").replace("/", "_").replace("\\", "_")
-    # Use just the filename (no timestamp) so same file gets overwritten
-    file_path = os.path.join(uploads_dir, safe_name)
-    # Stream file to disk instead of loading into memory
-    with open(file_path, "wb") as f:
-        async for chunk in resume.file_iterator():
-            f.write(chunk)
+    content_type = resume.content_type or "application/octet-stream"
+    storage_type = "local"
 
-    # Extract text
-    raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)
+    if gdrive_client and gdrive_client.is_configured():
+        # Upload to Google Drive
+        content = await resume.read()
+        drive_file_id = gdrive_client.upload_file(content, safe_name, content_type)
+        if not drive_file_id:
+            return html_page("Candidate Portal", f"<a href='/candidate'>Back</a>", error="Failed to upload to Google Drive")
+        file_path = drive_file_id  # Store Drive file ID instead of local path
+        storage_type = "gdrive"
+    else:
+        # Save to local disk
+        uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+        os.makedirs(uploads_dir, exist_ok=True)
+        file_path = os.path.join(uploads_dir, safe_name)
+        # Stream file to disk instead of loading into memory
+        with open(file_path, "wb") as f:
+            async for chunk in resume.file_iterator():
+                f.write(chunk)
+
+    # Extract text (for Google Drive, download first)
+    if storage_type == "gdrive":
+        content = gdrive_client.get_file(file_path)
+        if content:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_name)[1]) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            raw_text, parse_error = DocumentParser.extract_text(tmp_path, safe_name)
+            os.unlink(tmp_path)
+        else:
+            raw_text = ""
+            parse_error = "Failed to download from Google Drive"
+    else:
+        raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)
     if parse_error:
         return html_page("Candidate Portal", f"<a href='/candidate'>Back</a>", error=parse_error)
 
@@ -2178,7 +2340,7 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
 
     # Create embedding and store (will override if same filename exists)
     embedding = matcher.embed_resume(resume_data, raw_text)
-    db.insert_resume(safe_name, resume.content_type, raw_text, resume_data, embedding, file_path)
+    db.insert_resume(safe_name, resume.content_type, raw_text, resume_data, embedding, file_path, storage_type)
     
     # Track skills in taxonomy for learning
     db.track_skills({
@@ -2311,14 +2473,41 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
     results = []
     for resume in resumes:
         safe_name = (resume.filename or "resume").replace("/", "_").replace("\\", "_")
-        file_path = os.path.join(uploads_dir, safe_name)
-        # Stream file to disk instead of loading into memory
-        with open(file_path, "wb") as f:
-            async for chunk in resume.file_iterator():
-                f.write(chunk)
+        content_type = resume.content_type or "application/octet-stream"
+        storage_type = "local"
 
-        # Extract text
-        raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)
+        if gdrive_client and gdrive_client.is_configured():
+            # Upload to Google Drive
+            content = await resume.read()
+            drive_file_id = gdrive_client.upload_file(content, safe_name, content_type)
+            if not drive_file_id:
+                results.append({"filename": safe_name, "status": "error", "error": "Failed to upload to Google Drive"})
+                continue
+            file_path = drive_file_id
+            storage_type = "gdrive"
+        else:
+            # Save to local disk
+            file_path = os.path.join(uploads_dir, safe_name)
+            # Stream file to disk instead of loading into memory
+            with open(file_path, "wb") as f:
+                async for chunk in resume.file_iterator():
+                    f.write(chunk)
+
+        # Extract text (for Google Drive, download first)
+        if storage_type == "gdrive":
+            content = gdrive_client.get_file(file_path)
+            if content:
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_name)[1]) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                raw_text, parse_error = DocumentParser.extract_text(tmp_path, safe_name)
+                os.unlink(tmp_path)
+            else:
+                raw_text = ""
+                parse_error = "Failed to download from Google Drive"
+        else:
+            raw_text, parse_error = DocumentParser.extract_text(file_path, safe_name)
         if parse_error:
             results.append({"filename": safe_name, "status": "error", "error": parse_error})
             continue
@@ -2330,7 +2519,7 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
 
         # Create embedding and store
         embedding = matcher.embed_resume(resume_data, raw_text)
-        db.insert_resume(safe_name, resume.content_type, raw_text, resume_data, embedding, file_path)
+        db.insert_resume(safe_name, resume.content_type, raw_text, resume_data, embedding, file_path, storage_type)
 
         # Track skills
         db.track_skills({

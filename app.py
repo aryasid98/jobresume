@@ -2307,10 +2307,10 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
         uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
         os.makedirs(uploads_dir, exist_ok=True)
         file_path = os.path.join(uploads_dir, safe_name)
-        # Stream file to disk instead of loading into memory
+        # Read file and save to disk
+        content = await resume.read()
         with open(file_path, "wb") as f:
-            async for chunk in resume.file_iterator():
-                f.write(chunk)
+            f.write(content)
 
     # Extract text (for Google Drive, download first)
     if storage_type == "gdrive":
@@ -2488,10 +2488,10 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
         else:
             # Save to local disk
             file_path = os.path.join(uploads_dir, safe_name)
-            # Stream file to disk instead of loading into memory
+            # Read file and save to disk
+            content = await resume.read()
             with open(file_path, "wb") as f:
-                async for chunk in resume.file_iterator():
-                    f.write(chunk)
+                f.write(content)
 
         # Extract text (for Google Drive, download first)
         if storage_type == "gdrive":

@@ -405,7 +405,7 @@ class OllamaClient(LLMClient):
 class GroqClient(LLMClient):
     """Client for Groq cloud API (OpenAI-compatible)."""
 
-    DEFAULT_MODEL = "llama3-70b-8192"
+    DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
     def __init__(self, api_key: str = LLM_API_KEY, model: str = "", timeout: int = LLM_TIMEOUT):
         self.api_key = api_key

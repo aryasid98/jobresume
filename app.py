@@ -55,6 +55,12 @@ ENABLE_CHROMA = os.environ.get("ENABLE_CHROMA", "true").lower() == "true"
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
 USE_GOOGLE_DRIVE = os.environ.get("USE_GOOGLE_DRIVE", "false").lower() == "true"
 
+# Supabase configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_BUCKET_NAME = os.environ.get("SUPABASE_BUCKET_NAME", "resumes")
+USE_SUPABASE = os.environ.get("USE_SUPABASE", "false").lower() == "true"
+
 # Conditionally import ChromaDB to save memory when disabled
 if ENABLE_CHROMA:
     import chromadb
@@ -405,7 +411,7 @@ class OllamaClient(LLMClient):
 class GroqClient(LLMClient):
     """Client for Groq cloud API (OpenAI-compatible)."""
 
-    DEFAULT_MODEL = "llama-3.3-70b-versatile"
+    DEFAULT_MODEL = "llama3-70b-8192"
 
     def __init__(self, api_key: str = LLM_API_KEY, model: str = "", timeout: int = LLM_TIMEOUT):
         self.api_key = api_key
@@ -416,19 +422,35 @@ class GroqClient(LLMClient):
     def generate(self, prompt: str) -> Tuple[Optional[str], Optional[str]]:
         if not self.api_key:
             return None, "Groq API key not set. Set LLM_API_KEY environment variable."
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                resp = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                    json={
-                        "model": self.model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.1,
-                        "max_tokens": 4096,
-                    }
-                )
-                resp.raise_for_status()
+
+        import time
+        max_retries = 5
+        base_delay = 1  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    resp = client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                        json={
+                            "model": self.model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "temperature": 0.1,
+                            "max_tokens": 4096,
+                        }
+                    )
+                    if resp.status_code == 429:  # Rate limit
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)  # Exponential backoff
+                            logger.warning(f"Groq rate limited, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            return None, f"Groq API rate limit exceeded after {max_retries} retries"
+                    elif resp.status_code == 404:
+                        return None, f"Groq model '{self.model}' not found. Check LLM_MODEL environment variable."
+                    resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"], None
         except httpx.ConnectError:
@@ -1065,6 +1087,80 @@ class GoogleDriveClient:
     def get_download_url(self, file_id: str) -> str:
         """Get direct download URL for file (requires authentication)."""
         return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+class SupabaseClient:
+    """Supabase Storage client for file upload/download."""
+
+    def __init__(self):
+        if not all([SUPABASE_URL, SUPABASE_ANON_KEY]):
+            logger.warning("Supabase credentials not configured")
+            self.client = None
+            self.bucket_name = None
+            return
+
+        try:
+            from supabase import create_client
+            self.client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+            self.bucket_name = SUPABASE_BUCKET_NAME
+            logger.info("Supabase client initialized for bucket: %s", self.bucket_name)
+        except Exception as e:
+            logger.error("Failed to initialize Supabase client: %s", e)
+            self.client = None
+            self.bucket_name = None
+
+    def is_configured(self) -> bool:
+        return self.client is not None
+
+    def upload_file(self, file_data: bytes, filename: str, content_type: str = None) -> Optional[str]:
+        """Upload file to Supabase Storage and return storage path."""
+        if not self.is_configured():
+            return None
+
+        try:
+            import time
+            # Add timestamp to filename to avoid conflicts
+            timestamp = int(time.time())
+            storage_path = f"{timestamp}_{filename}"
+
+            self.client.storage.from_(self.bucket_name).upload(
+                path=storage_path,
+                file=file_data,
+                file_options={"content-type": content_type or "application/octet-stream"}
+            )
+
+            logger.info("Uploaded to Supabase: %s (path: %s)", filename, storage_path)
+            return storage_path
+        except Exception as e:
+            logger.error("Supabase upload failed for %s: %s", filename, e)
+            return None
+
+    def get_file(self, storage_path: str) -> Optional[bytes]:
+        """Download file from Supabase Storage."""
+        if not self.is_configured():
+            return None
+
+        try:
+            response = self.client.storage.from_(self.bucket_name).download(storage_path)
+            return response
+        except Exception as e:
+            logger.error("Supabase download failed for %s: %s", storage_path, e)
+            return None
+
+    def get_download_url(self, storage_path: str) -> str:
+        """Get signed download URL for file (valid for 1 hour)."""
+        if not self.is_configured():
+            return ""
+        try:
+            # Generate signed URL valid for 3600 seconds (1 hour)
+            url = self.client.storage.from_(self.bucket_name).create_signed_url(
+                storage_path,
+                expires_in=3600
+            )
+            return url
+        except Exception as e:
+            logger.error("Failed to generate signed URL for %s: %s", storage_path, e)
+            return ""
 
 
 # =============================================================================
@@ -2097,16 +2193,28 @@ extractor: Optional[SkillExtractor] = None
 matcher: Optional[EmbeddingMatcher] = None
 vstore: Optional[VectorStore] = None
 gsheet_sync: Optional[GoogleSheetsSync] = None
+gdrive_client: Optional[GoogleDriveClient] = None
+supabase_client: Optional[SupabaseClient] = None
 
 
 @app.get("/resume/{filename}")
 def serve_resume(filename: str):
     """Serve resume file for viewing/downloading."""
-    # Check if stored in Google Drive
+    # Check storage type
     resume = db.get_resume_by_filename(filename)
-    if resume and resume.get("storage_type") == "gdrive":
-        if gdrive_client and gdrive_client.is_configured():
-            drive_url = gdrive_client.get_download_url(resume["file_path"])
+    if resume:
+        storage_type = resume.get("storage_type", "local")
+        file_path = resume.get("file_path")
+
+        # Supabase Storage
+        if storage_type == "supabase" and supabase_client and supabase_client.is_configured():
+            signed_url = supabase_client.get_download_url(file_path)
+            if signed_url:
+                return RedirectResponse(signed_url)
+
+        # Google Drive
+        elif storage_type == "gdrive" and gdrive_client and gdrive_client.is_configured():
+            drive_url = gdrive_client.get_download_url(file_path)
             return RedirectResponse(drive_url)
 
     # Fall back to local file
@@ -2119,7 +2227,7 @@ def serve_resume(filename: str):
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global db, llm_client, extractor, matcher, vstore, gsheet_sync, gdrive_client
+    global db, llm_client, extractor, matcher, vstore, gsheet_sync, gdrive_client, supabase_client
     # Initialize ChromaDB vector store (optional for memory-constrained deployments)
     if ENABLE_CHROMA:
         vstore = VectorStore(CHROMA_DB_PATH)
@@ -2142,6 +2250,18 @@ def on_startup() -> None:
     else:
         gdrive_client = None
         logger.info("Google Drive storage disabled")
+
+    # Initialize Supabase client if enabled
+    if USE_SUPABASE:
+        supabase_client = SupabaseClient()
+        if supabase_client.is_configured():
+            logger.info("Supabase storage enabled")
+        else:
+            supabase_client = None
+            logger.info("Supabase storage disabled (credentials not configured)")
+    else:
+        supabase_client = None
+        logger.info("Supabase storage disabled")
 
     # Migrate existing embeddings from SQLite JSON blobs into ChromaDB (one-time)
     if ENABLE_CHROMA:
@@ -2294,7 +2414,15 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
     content_type = resume.content_type or "application/octet-stream"
     storage_type = "local"
 
-    if gdrive_client and gdrive_client.is_configured():
+    if supabase_client and supabase_client.is_configured():
+        # Upload to Supabase Storage
+        content = await resume.read()
+        storage_path = supabase_client.upload_file(content, safe_name, content_type)
+        if not storage_path:
+            return html_page("Candidate Portal", f"<a href='/candidate'>Back</a>", error="Failed to upload to Supabase Storage")
+        file_path = storage_path  # Store Supabase storage path
+        storage_type = "supabase"
+    elif gdrive_client and gdrive_client.is_configured():
         # Upload to Google Drive
         content = await resume.read()
         drive_file_id = gdrive_client.upload_file(content, safe_name, content_type)
@@ -2312,8 +2440,20 @@ async def upload_resume(resume: UploadFile = File(...), find_jobs: str = Form(No
         with open(file_path, "wb") as f:
             f.write(content)
 
-    # Extract text (for Google Drive, download first)
-    if storage_type == "gdrive":
+    # Extract text (for Supabase/Google Drive, download first)
+    if storage_type == "supabase":
+        content = supabase_client.get_file(file_path)
+        if content:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_name)[1]) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            raw_text, parse_error = DocumentParser.extract_text(tmp_path, safe_name)
+            os.unlink(tmp_path)
+        else:
+            raw_text = ""
+            parse_error = "Failed to download from Supabase Storage"
+    elif storage_type == "gdrive":
         content = gdrive_client.get_file(file_path)
         if content:
             import tempfile
@@ -2479,7 +2619,16 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
         content_type = resume.content_type or "application/octet-stream"
         storage_type = "local"
 
-        if gdrive_client and gdrive_client.is_configured():
+        if supabase_client and supabase_client.is_configured():
+            # Upload to Supabase Storage
+            content = await resume.read()
+            storage_path = supabase_client.upload_file(content, safe_name, content_type)
+            if not storage_path:
+                results.append({"filename": safe_name, "status": "error", "error": "Failed to upload to Supabase Storage"})
+                continue
+            file_path = storage_path
+            storage_type = "supabase"
+        elif gdrive_client and gdrive_client.is_configured():
             # Upload to Google Drive
             content = await resume.read()
             drive_file_id = gdrive_client.upload_file(content, safe_name, content_type)
@@ -2496,8 +2645,20 @@ async def upload_resumes(resumes: List[UploadFile] = File(...)) -> str:
             with open(file_path, "wb") as f:
                 f.write(content)
 
-        # Extract text (for Google Drive, download first)
-        if storage_type == "gdrive":
+        # Extract text (for Supabase/Google Drive, download first)
+        if storage_type == "supabase":
+            content = supabase_client.get_file(file_path)
+            if content:
+                import tempfile
+                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_name)[1]) as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                raw_text, parse_error = DocumentParser.extract_text(tmp_path, safe_name)
+                os.unlink(tmp_path)
+            else:
+                raw_text = ""
+                parse_error = "Failed to download from Supabase Storage"
+        elif storage_type == "gdrive":
             content = gdrive_client.get_file(file_path)
             if content:
                 import tempfile

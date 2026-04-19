@@ -1517,6 +1517,7 @@ class SupabaseDatabase:
                     (filename, content_type, raw_text, extracted_data.to_json(),
                      EmbeddingMatcher.embedding_to_json(embedding), file_path, storage_type,
                      datetime.now(timezone.utc).isoformat())
+                )
                 resume_id = cursor.fetchone()[0]
             conn.commit()
             # Store embedding in vector store
@@ -1552,6 +1553,7 @@ class SupabaseDatabase:
                  source,
                  posted_by,
                  datetime.now(timezone.utc).isoformat())
+            )
             job_id = cursor.fetchone()[0]
             conn.commit()
             # Store embedding in vector store

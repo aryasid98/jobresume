@@ -453,12 +453,14 @@ class GroqClient(LLMClient):
                     resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"], None
-        except httpx.ConnectError:
-            return None, "Cannot connect to Groq API."
-        except httpx.TimeoutException:
-            return None, f"Groq API request timed out after {self.timeout}s"
-        except Exception as e:
-            return None, f"Groq API error: {str(e)}"
+            except httpx.ConnectError:
+                return None, "Cannot connect to Groq API."
+            except httpx.TimeoutException:
+                return None, f"Groq API request timed out after {self.timeout}s"
+            except Exception as e:
+                return None, f"Groq API error: {str(e)}"
+
+        return None, f"Groq API failed after {max_retries} retries"
 
     def is_available(self) -> bool:
         if not self.api_key:

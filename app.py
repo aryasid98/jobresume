@@ -60,6 +60,8 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 SUPABASE_BUCKET_NAME = os.environ.get("SUPABASE_BUCKET_NAME", "resumes")
 USE_SUPABASE = os.environ.get("USE_SUPABASE", "false").lower() == "true"
+SUPABASE_DB_URL = os.environ.get("SUPABASE_DB_URL", "")
+USE_SUPABASE_DB = os.environ.get("USE_SUPABASE_DB", "false").lower() == "true"
 
 # Conditionally import ChromaDB to save memory when disabled
 if ENABLE_CHROMA:
@@ -1244,6 +1246,147 @@ class EmbeddingMatcher:
 # Vector Store (ChromaDB)
 # =============================================================================
 
+class SupabaseVectorStore:
+    """Supabase pgvector-backed vector store for embedding storage and similarity search."""
+
+    def __init__(self, db_url: str = SUPABASE_DB_URL):
+        self.db_url = db_url
+
+    def _get_conn(self):
+        import psycopg2
+        return psycopg2.connect(self.db_url)
+
+    def add_resume(self, resume_id: int, embedding: np.ndarray) -> None:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO resume_embeddings (id, embedding) VALUES (%s, %s)
+                   ON CONFLICT (id) DO UPDATE SET embedding = %s""",
+                (resume_id, embedding.tolist(), embedding.tolist())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def add_job(self, job_id: int, embedding: np.ndarray) -> None:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO job_embeddings (id, embedding) VALUES (%s, %s)
+                   ON CONFLICT (id) DO UPDATE SET embedding = %s""",
+                (job_id, embedding.tolist(), embedding.tolist())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_resume_embedding(self, resume_id: int) -> Optional[np.ndarray]:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT embedding FROM resume_embeddings WHERE id = %s", (resume_id,))
+            result = cursor.fetchone()
+            if result:
+                return np.asarray(result[0], dtype=np.float32)
+            return None
+        finally:
+            conn.close()
+
+    def get_job_embedding(self, job_id: int) -> Optional[np.ndarray]:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT embedding FROM job_embeddings WHERE id = %s", (job_id,))
+            result = cursor.fetchone()
+            if result:
+                return np.asarray(result[0], dtype=np.float32)
+            return None
+        finally:
+            conn.close()
+
+    def query_similar_jobs(self, query_embedding: np.ndarray, top_k: int = 50) -> dict:
+        """Query top-k most similar jobs using pgvector cosine similarity."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT id, 1 - (embedding <=> %s::vector) as similarity
+                   FROM job_embeddings
+                   ORDER BY embedding <=> %s::vector
+                   LIMIT %s""",
+                (query_embedding.tolist(), query_embedding.tolist(), top_k)
+            )
+            results = cursor.fetchall()
+            return {row[0]: max(0.0, min(1.0, row[1])) for row in results}
+        finally:
+            conn.close()
+
+    def query_similar_resumes(self, query_embedding: np.ndarray, top_k: int = 50) -> dict:
+        """Query top-k most similar resumes using pgvector cosine similarity."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT id, 1 - (embedding <=> %s::vector) as similarity
+                   FROM resume_embeddings
+                   ORDER BY embedding <=> %s::vector
+                   LIMIT %s""",
+                (query_embedding.tolist(), query_embedding.tolist(), top_k)
+            )
+            results = cursor.fetchall()
+            return {row[0]: max(0.0, min(1.0, row[1])) for row in results}
+        finally:
+            conn.close()
+
+    def delete_jobs(self, job_ids: List[int]) -> None:
+        if job_ids:
+            import psycopg2
+            conn = self._get_conn()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM job_embeddings WHERE id = ANY(%s)",
+                    (job_ids,)
+                )
+                conn.commit()
+            except Exception:
+                pass
+            finally:
+                conn.close()
+
+    def delete_job(self, job_id: int) -> None:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM job_embeddings WHERE id = %s", (job_id,))
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def delete_resume(self, resume_id: int) -> None:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM resume_embeddings WHERE id = %s", (resume_id,))
+            conn.commit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+
 class VectorStore:
     """ChromaDB-backed vector store for embedding storage and similarity search."""
 
@@ -1323,6 +1466,184 @@ class VectorStore:
 # =============================================================================
 # Database
 # =============================================================================
+
+class SupabaseDatabase:
+    """Supabase PostgreSQL database for storing resumes and jobs."""
+
+    def __init__(self, db_url: str = SUPABASE_DB_URL, vector_store: 'VectorStore' = None):
+        self.db_url = db_url
+        self.vector_store = vector_store
+        self._init_db()
+
+    def _get_conn(self):
+        import psycopg2
+        return psycopg2.connect(self.db_url)
+
+    def _init_db(self) -> None:
+        """Initialize database tables if they don't exist."""
+        # Tables are created manually in Supabase SQL Editor
+        # This method can be used for migrations if needed
+        pass
+
+    def insert_resume(self, filename: str, content_type: str, raw_text: str,
+                      extracted_data: ResumeData, embedding: np.ndarray, file_path: str, storage_type: str = "local") -> int:
+        """Insert or update resume. If filename exists, override it."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            # Check if resume with same filename exists
+            cursor.execute(
+                "SELECT id FROM resumes WHERE filename = %s", (filename,)
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                # Update existing resume
+                cursor.execute(
+                    """UPDATE resumes SET content_type=%s, raw_text=%s, extracted_data_json=%s,
+                       embedding_json=%s, file_path=%s, storage_type=%s, created_at=%s WHERE filename=%s""",
+                    (content_type, raw_text, extracted_data.to_json(),
+                     EmbeddingMatcher.embedding_to_json(embedding), file_path, storage_type,
+                     datetime.now(timezone.utc).isoformat(), filename)
+                )
+                conn.commit()
+                resume_id = existing[0]
+            else:
+                # Insert new resume
+                cursor.execute(
+                    """INSERT INTO resumes (filename, content_type, raw_text, extracted_data_json, embedding_json, file_path, storage_type, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (filename, content_type, raw_text, extracted_data.to_json(),
+                     EmbeddingMatcher.embedding_to_json(embedding), file_path, storage_type,
+                     datetime.now(timezone.utc).isoformat())
+                resume_id = cursor.fetchone()[0]
+            conn.commit()
+            # Store embedding in vector store
+            if self.vector_store:
+                self.vector_store.add_resume(resume_id, embedding)
+            return resume_id
+        finally:
+            conn.close()
+
+    def get_resume_by_filename(self, filename: str) -> Optional[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM resumes WHERE filename = %s", (filename,))
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
+    def insert_job(self, title: str, description: str, extracted_data: JobData, embedding: np.ndarray,
+                   posted_date: str = None, source: str = "manual", posted_by: str = "") -> int:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO jobs (title, description, extracted_data_json, embedding_json, posted_date, source, posted_by, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                (title, description, extracted_data.to_json(),
+                 EmbeddingMatcher.embedding_to_json(embedding),
+                 posted_date or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                 source,
+                 posted_by,
+                 datetime.now(timezone.utc).isoformat())
+            job_id = cursor.fetchone()[0]
+            conn.commit()
+            # Store embedding in vector store
+            if self.vector_store:
+                self.vector_store.add_job(job_id, embedding)
+            return job_id
+        finally:
+            conn.close()
+
+    def get_jobs(self) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM jobs ORDER BY created_at DESC")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def delete_job(self, job_id: int) -> bool:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM jobs WHERE id = %s", (job_id,))
+            conn.commit()
+            if self.vector_store:
+                self.vector_store.delete_job(job_id)
+            return True
+        except Exception as e:
+            logger.error("Failed to delete job: %s", e)
+            return False
+        finally:
+            conn.close()
+
+    def cleanup_expired_jobs(self, retention_days: int = 30) -> int:
+        """Delete jobs older than retention_days. Returns count of deleted jobs."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            cursor.execute(
+                "DELETE FROM jobs WHERE posted_date < %s RETURNING id",
+                (cutoff.strftime("%Y-%m-%d"),)
+            )
+            deleted_ids = [row[0] for row in cursor.fetchall()]
+            conn.commit()
+            # Delete from vector store
+            if self.vector_store:
+                for job_id in deleted_ids:
+                    self.vector_store.delete_job(job_id)
+            return len(deleted_ids)
+        finally:
+            conn.close()
+
+    def get_all_skills(self) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM skills ORDER BY skill_name")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def update_skill_taxonomy(self, skills: List[str], category: str, source: str, 
+                             resume_count: int = 0, job_count: int = 0) -> None:
+        """Update skills taxonomy table with discovered skills."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            now = datetime.now(timezone.utc).isoformat()
+            for skill in skills:
+                skill_lower = skill.lower()
+                cursor.execute(
+                    """INSERT INTO skills (skill_name, skill_name_lower, category, source, resume_count, job_count, first_seen, last_seen)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (skill_name_lower) DO UPDATE SET
+                           resume_count = skills.resume_count + %s,
+                           job_count = skills.job_count + %s,
+                           last_seen = %s""",
+                    (skill, skill_lower, category, source, resume_count, job_count, now, now,
+                     resume_count, job_count, now)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 class Database:
     """Database for storing resumes and jobs."""
@@ -2233,15 +2554,32 @@ def serve_resume(filename: str):
 @app.on_event("startup")
 def on_startup() -> None:
     global db, llm_client, extractor, matcher, vstore, gsheet_sync, gdrive_client, supabase_client
-    # Initialize ChromaDB vector store (optional for memory-constrained deployments)
-    if ENABLE_CHROMA:
-        vstore = VectorStore(CHROMA_DB_PATH)
-        logger.info("ChromaDB enabled at: %s", CHROMA_DB_PATH)
+
+    # Initialize vector store and database based on configuration
+    if USE_SUPABASE_DB:
+        if SUPABASE_DB_URL:
+            vstore = SupabaseVectorStore(SUPABASE_DB_URL)
+            db = SupabaseDatabase(SUPABASE_DB_URL, vector_store=vstore)
+            logger.info("Supabase PostgreSQL database enabled")
+        else:
+            logger.warning("USE_SUPABASE_DB=true but SUPABASE_DB_URL not set, falling back to SQLite")
+            if ENABLE_CHROMA:
+                vstore = VectorStore(CHROMA_DB_PATH)
+                logger.info("ChromaDB enabled at: %s", CHROMA_DB_PATH)
+            else:
+                vstore = None
+                logger.info("ChromaDB disabled for memory optimization")
+            db = Database(vector_store=vstore)
     else:
-        vstore = None
-        logger.info("ChromaDB disabled for memory optimization")
-    # Initialize database with vector store (optional)
-    db = Database(vector_store=vstore)
+        # Initialize ChromaDB vector store (optional for memory-constrained deployments)
+        if ENABLE_CHROMA:
+            vstore = VectorStore(CHROMA_DB_PATH)
+            logger.info("ChromaDB enabled at: %s", CHROMA_DB_PATH)
+        else:
+            vstore = None
+            logger.info("ChromaDB disabled for memory optimization")
+        # Initialize database with vector store (optional)
+        db = Database(vector_store=vstore)
     # Initialize LLM client based on LLM_PROVIDER env var
     llm_client = create_llm_client()
     logger.info("LLM provider: %s", llm_client.get_provider_name())
@@ -2269,7 +2607,8 @@ def on_startup() -> None:
         logger.info("Supabase storage disabled")
 
     # Migrate existing embeddings from SQLite JSON blobs into ChromaDB (one-time)
-    if ENABLE_CHROMA:
+    # Skip migration if using Supabase
+    if ENABLE_CHROMA and not USE_SUPABASE_DB:
         _migrate_embeddings_to_chroma(db, vstore)
 
     # Auto-sync Google Sheet jobs on startup (cleanup expired + fetch new)

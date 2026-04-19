@@ -450,6 +450,9 @@ class GroqClient(LLMClient):
                             return None, f"Groq API rate limit exceeded after {max_retries} retries"
                     elif resp.status_code == 404:
                         return None, f"Groq model '{self.model}' not found. Check LLM_MODEL environment variable."
+                    elif resp.status_code == 400:
+                        error_detail = resp.text if resp.text else "No error details"
+                        return None, f"Groq API bad request: {error_detail}"
                     resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"], None

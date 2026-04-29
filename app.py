@@ -1527,6 +1527,17 @@ class SupabaseDatabase:
         finally:
             conn.close()
 
+    def get_all_resumes(self) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM resumes ORDER BY id DESC")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
     def get_resume_by_filename(self, filename: str) -> Optional[dict]:
         import psycopg2
         import psycopg2.extras
@@ -1570,6 +1581,58 @@ class SupabaseDatabase:
         try:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute("SELECT * FROM jobs ORDER BY created_at DESC")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_all_jobs(self) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM jobs ORDER BY id DESC")
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_stats(self) -> Tuple[int, int]:
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM resumes")
+            resume_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM jobs")
+            job_count = cursor.fetchone()[0]
+            return (resume_count, job_count)
+        finally:
+            conn.close()
+
+    def get_recent_resumes(self, limit: int = 10) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM resumes ORDER BY id DESC LIMIT %s",
+                (limit,)
+            )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_recent_jobs(self, limit: int = 10) -> List[dict]:
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT * FROM jobs ORDER BY id DESC LIMIT %s",
+                (limit,)
+            )
             return cursor.fetchall()
         finally:
             conn.close()
@@ -1619,6 +1682,86 @@ class SupabaseDatabase:
             cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             cursor.execute("SELECT * FROM skills ORDER BY skill_name")
             return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_top_skills(self, limit: int = 20, source: str = "all") -> List[dict]:
+        """Get most common skills."""
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            if source == "all":
+                cursor.execute(
+                    "SELECT * FROM skills ORDER BY (resume_count + job_count) DESC LIMIT %s",
+                    (limit,)
+                )
+            elif source == "resume":
+                cursor.execute(
+                    "SELECT * FROM skills ORDER BY resume_count DESC LIMIT %s",
+                    (limit,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM skills ORDER BY job_count DESC LIMIT %s",
+                    (limit,)
+                )
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def get_related_skills(self, skill_name: str, limit: int = 10) -> List[Tuple[str, int]]:
+        """Get skills that frequently appear with the given skill."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT s1.skill_name, sc.count
+                   FROM skill_cooccurrence sc
+                   JOIN skills s1 ON sc.skill1_id = s1.id
+                   JOIN skills s2 ON sc.skill2_id = s2.id
+                   WHERE s2.skill_name_lower = %s OR s1.skill_name_lower = %s
+                   ORDER BY sc.count DESC
+                   LIMIT %s""",
+                (skill_name.lower(), skill_name.lower(), limit)
+            )
+            return [(row[0], row[1]) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_skills_stats(self) -> dict:
+        """Get overall skills statistics."""
+        import psycopg2
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM skills")
+            total_skills = cursor.fetchone()[0]
+            cursor.execute("SELECT SUM(resume_count) FROM skills")
+            total_resume_mentions = cursor.fetchone()[0] or 0
+            cursor.execute("SELECT SUM(job_count) FROM skills")
+            total_job_mentions = cursor.fetchone()[0] or 0
+            return {
+                "total_skills": total_skills,
+                "total_resume_mentions": total_resume_mentions,
+                "total_job_mentions": total_job_mentions
+            }
+        finally:
+            conn.close()
+
+    def get_skills_by_category(self) -> dict:
+        """Get skill counts grouped by category."""
+        import psycopg2
+        import psycopg2.extras
+        conn = self._get_conn()
+        try:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(
+                "SELECT category, COUNT(*) as count FROM skills GROUP BY category ORDER BY count DESC"
+            )
+            return {row["category"]: row["count"] for row in cursor.fetchall()}
         finally:
             conn.close()
 

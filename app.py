@@ -1258,6 +1258,12 @@ class SupabaseVectorStore:
         db_url = self.db_url
         if "sslmode" not in db_url.lower():
             db_url += "&sslmode=require" if "?" in db_url else "?sslmode=require"
+        # Force IPv4 by adding host parameter to avoid IPv6 connection issues
+        import re
+        match = re.search(r'@([^:/]+)', db_url)
+        if match and "host=" not in db_url.lower():
+            host = match.group(1)
+            db_url += f"&host={host}" if "?" in db_url else f"?host={host}"
         return psycopg2.connect(db_url)
 
     def add_resume(self, resume_id: int, embedding: np.ndarray) -> None:
@@ -1485,6 +1491,12 @@ class SupabaseDatabase:
         db_url = self.db_url
         if "sslmode" not in db_url.lower():
             db_url += "&sslmode=require" if "?" in db_url else "?sslmode=require"
+        # Force IPv4 by adding host parameter to avoid IPv6 connection issues
+        import re
+        match = re.search(r'@([^:/]+)', db_url)
+        if match and "host=" not in db_url.lower():
+            host = match.group(1)
+            db_url += f"&host={host}" if "?" in db_url else f"?host={host}"
         return psycopg2.connect(db_url)
 
     def _init_db(self) -> None:

@@ -1607,6 +1607,80 @@ class SupabaseDatabase:
         finally:
             conn.close()
 
+    def track_skills(self, skills_by_category: dict, source: str = "resume") -> None:
+        """Track skills in the taxonomy. source is 'resume' or 'job'."""
+        import psycopg2
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        skill_ids = []
+        
+        try:
+            for category, skills in skills_by_category.items():
+                for skill in skills:
+                    if not skill or not skill.strip():
+                        continue
+                    skill_name = skill.strip()
+                    skill_lower = skill_name.lower()
+                    
+                    # Try to insert or update skill
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT id FROM skills WHERE skill_name_lower = %s",
+                        (skill_lower,)
+                    )
+                    existing = cursor.fetchone()
+                    
+                    if existing:
+                        skill_id = existing[0]
+                        if source == "resume":
+                            cursor.execute(
+                                "UPDATE skills SET resume_count = resume_count + 1, last_seen = %s WHERE id = %s",
+                                (now, skill_id)
+                            )
+                        else:
+                            cursor.execute(
+                                "UPDATE skills SET job_count = job_count + 1, last_seen = %s WHERE id = %s",
+                                (now, skill_id)
+                            )
+                    else:
+                        cursor.execute(
+                            """INSERT INTO skills (skill_name, skill_name_lower, category, source, resume_count, job_count, first_seen, last_seen)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                            (skill_name, skill_lower, category, source,
+                             1 if source == "resume" else 0,
+                             1 if source == "job" else 0,
+                             now, now)
+                        )
+                        skill_id = cursor.fetchone()[0]
+                    
+                    skill_ids.append(skill_id)
+            
+            # Track co-occurrences (skills that appear together)
+            for i, id1 in enumerate(skill_ids):
+                for id2 in skill_ids[i+1:]:
+                    # Ensure consistent ordering
+                    s1, s2 = min(id1, id2), max(id1, id2)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT count FROM skill_cooccurrence WHERE skill1_id = %s AND skill2_id = %s",
+                        (s1, s2)
+                    )
+                    existing = cursor.fetchone()
+                    if existing:
+                        cursor.execute(
+                            "UPDATE skill_cooccurrence SET count = count + 1 WHERE skill1_id = %s AND skill2_id = %s",
+                            (s1, s2)
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT INTO skill_cooccurrence (skill1_id, skill2_id, count) VALUES (%s, %s, 1)",
+                            (s1, s2)
+                        )
+            
+            conn.commit()
+        finally:
+            conn.close()
+
     def get_jobs(self) -> List[dict]:
         import psycopg2
         import psycopg2.extras

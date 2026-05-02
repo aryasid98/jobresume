@@ -1254,7 +1254,11 @@ class SupabaseVectorStore:
 
     def _get_conn(self):
         import psycopg2
-        return psycopg2.connect(self.db_url)
+        # Add SSL mode if not specified in connection string
+        db_url = self.db_url
+        if "sslmode" not in db_url.lower():
+            db_url += "&sslmode=require" if "?" in db_url else "?sslmode=require"
+        return psycopg2.connect(db_url)
 
     def add_resume(self, resume_id: int, embedding: np.ndarray) -> None:
         import psycopg2
@@ -1477,7 +1481,11 @@ class SupabaseDatabase:
 
     def _get_conn(self):
         import psycopg2
-        return psycopg2.connect(self.db_url)
+        # Add SSL mode if not specified in connection string
+        db_url = self.db_url
+        if "sslmode" not in db_url.lower():
+            db_url += "&sslmode=require" if "?" in db_url else "?sslmode=require"
+        return psycopg2.connect(db_url)
 
     def _init_db(self) -> None:
         """Initialize database tables if they don't exist."""

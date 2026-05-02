@@ -1296,26 +1296,36 @@ class SupabaseVectorStore:
 
     def get_resume_embedding(self, resume_id: int) -> Optional[np.ndarray]:
         import psycopg2
+        import json
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT embedding FROM resume_embeddings WHERE id = %s", (resume_id,))
             result = cursor.fetchone()
             if result:
-                return np.asarray(result[0], dtype=np.float32)
+                embedding = result[0]
+                # If embedding is stored as string, parse it
+                if isinstance(embedding, str):
+                    embedding = json.loads(embedding)
+                return np.asarray(embedding, dtype=np.float32)
             return None
         finally:
             conn.close()
 
     def get_job_embedding(self, job_id: int) -> Optional[np.ndarray]:
         import psycopg2
+        import json
         conn = self._get_conn()
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT embedding FROM job_embeddings WHERE id = %s", (job_id,))
             result = cursor.fetchone()
             if result:
-                return np.asarray(result[0], dtype=np.float32)
+                embedding = result[0]
+                # If embedding is stored as string, parse it
+                if isinstance(embedding, str):
+                    embedding = json.loads(embedding)
+                return np.asarray(embedding, dtype=np.float32)
             return None
         finally:
             conn.close()
